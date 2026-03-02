@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 
@@ -16,26 +17,27 @@ function parseTickers(rawValue) {
     .filter(Boolean)
 }
 
-export default function App() {
-  const [mode, setMode] = useState('recommend')
-  const [period, setPeriod] = useState('1mo')
-  const [model, setModel] = useState('gpt-5-nano')
-  const [tickerInput, setTickerInput] = useState('AAPL, MSFT, NVDA')
-  const [focus, setFocus] = useState('growth')
-  const [query, setQuery] = useState('')
-  const [result, setResult] = useState('')
+function FormPage() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const prefill = location.state?.prefill
+
+  const [mode, setMode] = useState(prefill?.mode ?? 'recommend')
+  const [period, setPeriod] = useState(prefill?.period ?? '1mo')
+  const [model, setModel] = useState(prefill?.model ?? 'gpt-5-nano')
+  const [tickerInput, setTickerInput] = useState(prefill?.tickerInput ?? 'AAPL, MSFT, NVDA')
+  const [focus, setFocus] = useState(prefill?.focus ?? 'growth')
+  const [query, setQuery] = useState(prefill?.query ?? '')
   const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
   const [csvFile, setCsvFile] = useState(null)
   const [uploadingCsv, setUploadingCsv] = useState(false)
   const [csvStatus, setCsvStatus] = useState('')
 
   const parsedTickers = useMemo(() => parseTickers(tickerInput), [tickerInput])
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault()
     setError('')
-    setResult('')
 
     if (mode === 'research' && parsedTickers.length === 0) {
       setError('Research mode requires at least one ticker.')
@@ -56,25 +58,12 @@ export default function App() {
       query: query.trim() || null,
     }
 
-    setLoading(true)
-    try {
-      const response = await fetch(`${API_BASE}/api/analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-
-      const data = await response.json()
-      if (!response.ok) {
-        throw new Error(data.detail || 'Request failed')
-      }
-
-      setResult(data.output)
-    } catch (err) {
-      setError(err.message || 'Unexpected error')
-    } finally {
-      setLoading(false)
-    }
+    navigate('/analysis', {
+      state: {
+        payload,
+        formSnapshot: { mode, period, model, tickerInput, focus, query },
+      },
+    })
   }
 
   const handleCsvUpload = async () => {
@@ -119,12 +108,12 @@ export default function App() {
           </p>
           <h1 className="text-2xl font-bold text-slate-900 md:text-4xl">Live Market Analysis Dashboard</h1>
           <p className="max-w-3xl text-sm text-slate-600 md:text-base">
-            Enter one ticker (like <span className="font-semibold">AAPL</span>) or a list (<span className="font-semibold">AAPL, MSFT, NVDA</span>) and run market analysis through your backend agent.
+            Enter one ticker (like <span className="font-semibold">AAPL</span>) or a list (<span className="font-semibold">AAPL, MSFT, NVDA</span>) and run market analysis.
           </p>
         </header>
 
-        <div className="grid gap-6 md:grid-cols-5">
-          <form onSubmit={handleSubmit} className="space-y-4 md:col-span-2">
+        <form onSubmit={handleSubmit} className="grid gap-6 md:grid-cols-5">
+          <section className="space-y-4 md:col-span-2">
             <label className="block space-y-2">
               <span className="text-sm font-medium text-slate-700">Mode</span>
               <select
@@ -219,32 +208,199 @@ export default function App() {
               />
             </label>
 
+            {error ? <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div> : null}
+
             <button
               type="submit"
-              disabled={loading}
-              className="w-full rounded-xl bg-brand-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
+              className="w-full rounded-xl bg-brand-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-brand-700"
             >
-              {loading ? 'Running analysis...' : 'Run Analysis'}
+              Run Analysis
             </button>
-          </form>
+          </section>
 
-          <section className="md:col-span-3">
-            <div className="h-full rounded-2xl border border-slate-200 bg-slate-950 p-4 md:p-6">
-              <h2 className="mb-3 text-lg font-semibold text-slate-100">Output</h2>
+          <section className="rounded-2xl border border-slate-200 bg-slate-950 p-4 text-slate-200 md:col-span-3 md:p-6">
+            <h2 className="mb-3 text-lg font-semibold text-slate-100">How It Works</h2>
+            <p className="text-sm text-slate-300">
+              Press <span className="font-semibold text-brand-200">Run Analysis</span> to navigate to a dedicated streaming page where you can see tool calls, backend status updates, and final output in real-time.
+            </p>
+          </section>
+        </form>
+      </div>
+    </main>
+  )
+}
 
-              {error ? (
-                <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
-              ) : null}
+function AnalysisPage() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const payload = location.state?.payload
+  const formSnapshot = location.state?.formSnapshot
 
-              {!error && !result && !loading ? (
-                <p className="text-sm text-slate-400">Run a request to view results here.</p>
-              ) : null}
+  const [events, setEvents] = useState([])
+  const [output, setOutput] = useState('')
+  const [status, setStatus] = useState('Connecting...')
+  const [error, setError] = useState('')
+  const [done, setDone] = useState(false)
+  const [showMenu, setShowMenu] = useState(true)
 
-              {loading ? <p className="text-sm text-brand-200">Fetching live data and generating analysis...</p> : null}
+  useEffect(() => {
+    if (!payload) return
 
-              {result ? (
-                <pre className="mt-2 max-h-[70vh] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-900 p-4 text-xs text-slate-200 md:text-sm">
-                  {result}
+    let cancelled = false
+
+    const runStream = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/analyze/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+
+        if (!response.ok || !response.body) {
+          const text = await response.text()
+          throw new Error(text || 'Failed to start stream')
+        }
+
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (!cancelled) {
+          const { value, done: streamDone } = await reader.read()
+          if (streamDone) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const chunks = buffer.split('\n\n')
+          buffer = chunks.pop() || ''
+
+          for (const chunk of chunks) {
+            const dataLine = chunk
+              .split('\n')
+              .find((line) => line.startsWith('data: '))
+            if (!dataLine) continue
+
+            const raw = dataLine.slice(6)
+            let event
+            try {
+              event = JSON.parse(raw)
+            } catch {
+              continue
+            }
+
+            if (event.type === 'connected') {
+              setStatus('Connected. Waiting for backend updates...')
+              continue
+            }
+
+            if (event.type === 'status') {
+              setStatus(event.message || 'Working...')
+              setEvents((prev) => [...prev, event])
+              continue
+            }
+
+            if (event.type === 'tool_start' || event.type === 'tool_end') {
+              setEvents((prev) => [...prev, event])
+              continue
+            }
+
+            if (event.type === 'final') {
+              setOutput(event.output || '')
+              setStatus('Completed')
+              continue
+            }
+
+            if (event.type === 'error') {
+              setError(event.message || 'Unknown error')
+              setStatus('Failed')
+              continue
+            }
+
+            if (event.type === 'done') {
+              setDone(true)
+              continue
+            }
+          }
+        }
+      } catch (err) {
+        setError(err.message || 'Stream failed')
+        setStatus('Failed')
+      }
+    }
+
+    runStream()
+
+    return () => {
+      cancelled = true
+    }
+  }, [payload])
+
+  if (!payload) {
+    return <Navigate to="/" replace />
+  }
+
+  return (
+    <main className="min-h-screen bg-gradient-to-br from-brand-100 via-slate-50 to-brand-50 p-4 md:p-8">
+      <div className="mx-auto max-w-7xl rounded-3xl border border-brand-100 bg-white/90 p-4 shadow-soft md:p-6">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-bold text-slate-900 md:text-2xl">Streaming Analysis</h1>
+            <p className="text-sm text-slate-600">Status: {status}{done ? ' • done' : ''}</p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setShowMenu((v) => !v)}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            >
+              {showMenu ? 'Hide Options' : 'Show Options'}
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/', { state: { prefill: formSnapshot } })}
+              className="rounded-lg bg-brand-600 px-3 py-2 text-sm font-semibold text-white hover:bg-brand-700"
+            >
+              Back to Form
+            </button>
+          </div>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-5">
+          {showMenu ? (
+            <aside className="rounded-2xl border border-slate-200 bg-slate-50 p-4 md:col-span-2">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-700">Selected Options</h2>
+              <pre className="max-h-[65vh] overflow-auto whitespace-pre-wrap rounded-lg bg-white p-3 text-xs text-slate-700">
+{JSON.stringify(payload, null, 2)}
+              </pre>
+            </aside>
+          ) : null}
+
+          <section className={`grid gap-4 ${showMenu ? 'md:col-span-3' : 'md:col-span-5'}`}>
+            <div className="rounded-2xl border border-slate-200 bg-slate-950 p-4">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-200">Live Backend Updates</h2>
+              <div className="max-h-[34vh] overflow-auto space-y-2">
+                {events.length === 0 ? (
+                  <p className="text-sm text-slate-400">Waiting for tool activity...</p>
+                ) : (
+                  events.map((event, idx) => (
+                    <div key={`${event.type}-${idx}`} className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200">
+                      <p className="font-semibold text-brand-200">{event.type}</p>
+                      {event.message ? <p>{event.message}</p> : null}
+                      {event.tool ? <p>tool: {event.tool}</p> : null}
+                      {event.input ? <p className="break-all text-slate-300">input: {event.input}</p> : null}
+                      {event.output_preview ? <p className="break-all text-slate-300">output: {event.output_preview}</p> : null}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-slate-950 p-4">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-200">Final Output</h2>
+              {error ? <p className="mb-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
+              {!error && !output ? <p className="text-sm text-slate-400">Output will appear when the run completes.</p> : null}
+              {output ? (
+                <pre className="max-h-[38vh] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-900 p-4 text-xs text-slate-200 md:text-sm">
+                  {output}
                 </pre>
               ) : null}
             </div>
@@ -252,5 +408,16 @@ export default function App() {
         </div>
       </div>
     </main>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<FormPage />} />
+        <Route path="/analysis" element={<AnalysisPage />} />
+      </Routes>
+    </BrowserRouter>
   )
 }

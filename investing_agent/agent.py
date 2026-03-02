@@ -1,7 +1,7 @@
 """LangChain-based investing agent."""
 
 import os
-from typing import List, Dict, Any
+from typing import Any, List, Optional
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor
@@ -89,7 +89,12 @@ Today's date is {date}.
             handle_parsing_errors=True
         )
 
-    def analyze_market(self, period: str = "1mo") -> str:
+    def _invoke(self, query: str, callbacks: Optional[List[Any]] = None) -> str:
+        config = {"callbacks": callbacks} if callbacks else None
+        result = self.agent_executor.invoke({"input": query}, config=config)
+        return result["output"]
+
+    def analyze_market(self, period: str = "1mo", callbacks: Optional[List[Any]] = None) -> str:
         """Analyze current market trends.
 
         Args:
@@ -108,10 +113,9 @@ Consider:
 
 Provide a comprehensive market analysis with insights about the current market environment."""
 
-        result = self.agent_executor.invoke({"input": query})
-        return result["output"]
+        return self._invoke(query, callbacks=callbacks)
 
-    def research_stock(self, ticker: str, timeframe: str = "1mo") -> str:
+    def research_stock(self, ticker: str, timeframe: str = "1mo", callbacks: Optional[List[Any]] = None) -> str:
         """Research a specific stock.
 
         Args:
@@ -132,14 +136,14 @@ Analyze:
 
 Provide a comprehensive stock analysis."""
 
-        result = self.agent_executor.invoke({"input": query})
-        return result["output"]
+        return self._invoke(query, callbacks=callbacks)
 
     def get_recommendations(
         self,
         tickers: List[str] = None,
         period: str = "1mo",
-        focus: str = None
+        focus: str = None,
+        callbacks: Optional[List[Any]] = None,
     ) -> str:
         """Get stock recommendations.
 
@@ -174,10 +178,9 @@ For each recommendation:
 
 Provide actionable investment recommendations."""
 
-        result = self.agent_executor.invoke({"input": query})
-        return result["output"]
+        return self._invoke(query, callbacks=callbacks)
 
-    def custom_query(self, query: str) -> str:
+    def custom_query(self, query: str, callbacks: Optional[List[Any]] = None) -> str:
         """Execute a custom investment research query.
 
         Args:
@@ -186,5 +189,4 @@ Provide actionable investment recommendations."""
         Returns:
             Agent response
         """
-        result = self.agent_executor.invoke({"input": query})
-        return result["output"]
+        return self._invoke(query, callbacks=callbacks)

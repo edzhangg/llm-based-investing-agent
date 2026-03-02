@@ -1,29 +1,21 @@
-"""Tools for market research and stock analysis."""
+"""Scraping-based tools for market research and stock analysis."""
 
+import csv
+import io
 import random
+import re
 import time
-from typing import Dict, List, Tuple
+from datetime import datetime
+from typing import List, Tuple
+from urllib.parse import unquote
 
 import requests
 from langchain.tools import tool
 
 
-_YAHOO_BASE_URLS = [
-    "https://query1.finance.yahoo.com",
-    "https://query2.finance.yahoo.com",
-]
-_REQUEST_TIMEOUT_SECONDS = 12
-_MIN_REQUEST_INTERVAL_SECONDS = 3.0
+_REQUEST_TIMEOUT_SECONDS = 15
+_MIN_REQUEST_INTERVAL_SECONDS = 1.2
 _LAST_REQUEST_TS = 0.0
-_CACHE: Dict[str, Tuple[float, Dict]] = {}
-_CACHE_TTL_SECONDS = {
-    "/v7/finance/quote": 60.0,
-    "/v8/finance/chart": 180.0,
-}
-_LAST_COOKIE_WARM_TS = 0.0
-_COOKIE_WARM_INTERVAL_SECONDS = 600.0
-_GLOBAL_COOLDOWN_UNTIL = 0.0
-_DEFAULT_429_COOLDOWN_SECONDS = 75.0
 
 _SESSION = requests.Session()
 _SESSION.headers.update(
@@ -33,36 +25,38 @@ _SESSION.headers.update(
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/123.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json,text/plain,*/*",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://finance.yahoo.com/",
     }
 )
 
-_PERIOD_TO_RANGE = {
-    "1d": "1d",
-    "5d": "5d",
-    "1mo": "1mo",
-    "3mo": "3mo",
-    "6mo": "6mo",
-    "1y": "1y",
-    "ytd": "ytd",
-}
-
-_PERIOD_TO_INTERVAL = {
-    "1d": "5m",
-    "5d": "15m",
-    "1mo": "1d",
-    "3mo": "1d",
-    "6mo": "1d",
-    "1y": "1d",
-    "ytd": "1d",
+_PERIOD_TO_POINTS = {
+    "1d": 2,
+    "5d": 5,
+    "1mo": 22,
+    "3mo": 66,
+    "6mo": 132,
+    "1y": 252,
+    "ytd": 252,
 }
 
 
-def _is_rate_limited_error(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return "429" in msg or "too many requests" in msg or "rate limit" in msg
+def _format_currency(value, decimals: int = 2) -> str:
+    if value is None:
+        return "N/A"
+    return f"${value:,.{decimals}f}"
+
+
+def _safe_float(value):
+    try:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or text in {"N/D", "-"}:
+            return None
+        return float(text.replace(",", ""))
+    except Exception:
+        return None
 
 
 def _throttle_requests() -> None:
@@ -74,151 +68,142 @@ def _throttle_requests() -> None:
     _LAST_REQUEST_TS = time.time()
 
 
-def _respect_global_cooldown() -> None:
-    now = time.time()
-    if _GLOBAL_COOLDOWN_UNTIL > now:
-        time.sleep(_GLOBAL_COOLDOWN_UNTIL - now)
-
-
-def _apply_global_cooldown(wait_seconds: float) -> None:
-    global _GLOBAL_COOLDOWN_UNTIL
-    _GLOBAL_COOLDOWN_UNTIL = max(_GLOBAL_COOLDOWN_UNTIL, time.time() + wait_seconds)
-
-
-def _cache_key(path: str, params: Dict[str, str]) -> str:
-    query = "&".join(f"{k}={params[k]}" for k in sorted(params))
-    return f"{path}?{query}"
-
-
-def _get_cached(path: str, params: Dict[str, str], allow_stale: bool = False):
-    key = _cache_key(path, params)
-    cached = _CACHE.get(key)
-    if not cached:
-        return None
-
-    ts, payload = cached
-    max_age = _CACHE_TTL_SECONDS["/v7/finance/quote"] if path.startswith("/v7/finance/quote") else _CACHE_TTL_SECONDS["/v8/finance/chart"]
-    if allow_stale or (time.time() - ts) <= max_age:
-        return payload
-    return None
-
-
-def _set_cached(path: str, params: Dict[str, str], payload: Dict) -> None:
-    _CACHE[_cache_key(path, params)] = (time.time(), payload)
-
-
-def _warm_yahoo_cookies() -> None:
-    global _LAST_COOKIE_WARM_TS
-    now = time.time()
-    if (now - _LAST_COOKIE_WARM_TS) < _COOKIE_WARM_INTERVAL_SECONDS:
-        return
-
-    try:
-        _SESSION.get("https://finance.yahoo.com/", timeout=8)
-    except Exception:
-        # Cookie warmup is best-effort only.
-        pass
-    finally:
-        _LAST_COOKIE_WARM_TS = time.time()
-
-
-def _fetch_json(path: str, params: Dict[str, str], retries: int = 4) -> Dict:
-    cached = _get_cached(path, params, allow_stale=False)
-    if cached is not None:
-        return cached
-
-    _warm_yahoo_cookies()
+def _http_get(url: str, params=None, retries: int = 3) -> requests.Response:
     last_exc = None
-
     for attempt in range(retries):
         try:
-            _respect_global_cooldown()
             _throttle_requests()
-            base_url = _YAHOO_BASE_URLS[attempt % len(_YAHOO_BASE_URLS)]
-            response = _SESSION.get(
-                f"{base_url}{path}",
-                params=params,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-
-            if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After")
-                wait_seconds = None
-                if retry_after and retry_after.isdigit():
-                    wait_seconds = float(retry_after)
-                effective_wait = wait_seconds if wait_seconds is not None else _DEFAULT_429_COOLDOWN_SECONDS
-                _apply_global_cooldown(effective_wait)
-                if attempt < retries - 1:
-                    time.sleep((2.0 * (2 ** attempt)) + random.uniform(0.5, 1.0))
-                    continue
-                raise RuntimeError(f"429 Too Many Requests for {response.url}")
-
-            response.raise_for_status()
-            payload = response.json()
-            _set_cached(path, params, payload)
-            return payload
+            resp = _SESSION.get(url, params=params, timeout=_REQUEST_TIMEOUT_SECONDS)
+            resp.raise_for_status()
+            return resp
         except Exception as exc:
             last_exc = exc
-            is_retryable = _is_rate_limited_error(exc)
-
-            if isinstance(exc, requests.RequestException) and getattr(exc, "response", None) is not None:
-                status_code = exc.response.status_code
-                is_retryable = is_retryable or status_code in (429, 500, 502, 503, 504)
-
-            if attempt == retries - 1 or not is_retryable:
+            if attempt == retries - 1:
                 break
-
-            backoff = (2.0 * (2 ** attempt)) + random.uniform(0.5, 1.0)
-            time.sleep(backoff)
-
-    # If live fetch repeatedly fails, return stale cache instead of hard failing.
-    stale = _get_cached(path, params, allow_stale=True)
-    if stale is not None:
-        return stale
-
+            time.sleep((0.8 * (2 ** attempt)) + random.uniform(0.2, 0.6))
     raise last_exc
 
 
-def _quote_for_symbol(ticker: str) -> Dict:
-    data = _fetch_json("/v7/finance/quote", {"symbols": ticker})
-    results = data.get("quoteResponse", {}).get("result", [])
-    print(results)
-    if not results:
-        raise ValueError(f"No quote data available for {ticker}")
-    return results[0]
+def _stooq_symbol(symbol: str) -> str:
+    s = symbol.strip().upper()
 
-
-def _chart_for_symbol(ticker: str, period: str) -> Tuple[List[float], List[float], List[float], List[float]]:
-    period_value = period if period in _PERIOD_TO_RANGE else "1mo"
-    params = {
-        "range": _PERIOD_TO_RANGE[period_value],
-        "interval": _PERIOD_TO_INTERVAL[period_value],
-        "includePrePost": "false",
-        "events": "div,splits",
+    # Common index aliases to tradable proxies for consistent scraping.
+    aliases = {
+        "^GSPC": "SPY.US",
+        "^DJI": "DIA.US",
+        "^IXIC": "QQQ.US",
+        "^VIX": "VIXY.US",
     }
+    if s in aliases:
+        return aliases[s].lower()
 
-    data = _fetch_json(f"/v8/finance/chart/{ticker}", params)
-    result = data.get("chart", {}).get("result")
-    if not result:
-        error_obj = data.get("chart", {}).get("error")
-        raise ValueError(f"No chart data for {ticker}: {error_obj}")
+    if "." in s:
+        return s.lower()
+    return f"{s.lower()}.us"
 
-    quote = result[0].get("indicators", {}).get("quote", [{}])[0]
-    closes = [float(v) for v in quote.get("close", []) if v is not None]
-    highs = [float(v) for v in quote.get("high", []) if v is not None]
-    lows = [float(v) for v in quote.get("low", []) if v is not None]
-    volumes = [float(v) for v in quote.get("volume", []) if v is not None]
+
+def _stooq_latest_quote(symbol: str):
+    stooq = _stooq_symbol(symbol)
+    resp = _http_get("https://stooq.com/q/l/", params={"s": stooq, "i": "d"})
+    rows = list(csv.DictReader(io.StringIO(resp.text)))
+    if not rows:
+        raise ValueError(f"No quote row for {symbol}")
+    row = rows[0]
+    close = _safe_float(row.get("Close"))
+    open_ = _safe_float(row.get("Open"))
+    high = _safe_float(row.get("High"))
+    low = _safe_float(row.get("Low"))
+    volume = _safe_float(row.get("Volume"))
+    date = row.get("Date", "N/A")
+    return close, open_, high, low, volume, date
+
+
+def _stooq_history(symbol: str) -> List[dict]:
+    stooq = _stooq_symbol(symbol)
+    resp = _http_get("https://stooq.com/q/d/l/", params={"s": stooq, "i": "d"})
+    rows = list(csv.DictReader(io.StringIO(resp.text)))
+    cleaned = []
+    for row in rows:
+        close = _safe_float(row.get("Close"))
+        high = _safe_float(row.get("High"))
+        low = _safe_float(row.get("Low"))
+        volume = _safe_float(row.get("Volume"))
+        if close is None:
+            continue
+        cleaned.append(
+            {
+                "date": row.get("Date"),
+                "close": close,
+                "high": high,
+                "low": low,
+                "volume": volume,
+            }
+        )
+    if not cleaned:
+        raise ValueError(f"No historical rows for {symbol}")
+    return cleaned
+
+
+def _recent_ohlcv(symbol: str, period: str) -> Tuple[List[float], List[float], List[float], List[float]]:
+    rows = _stooq_history(symbol)
+
+    if period == "ytd":
+        current_year = datetime.utcnow().year
+        rows = [r for r in rows if str(r.get("date", "")).startswith(str(current_year))]
+
+    points = _PERIOD_TO_POINTS.get(period, 22)
+    selected = rows[-points:] if len(rows) >= points else rows
+
+    closes = [r["close"] for r in selected if r.get("close") is not None]
+    highs = [r["high"] for r in selected if r.get("high") is not None]
+    lows = [r["low"] for r in selected if r.get("low") is not None]
+    volumes = [r["volume"] for r in selected if r.get("volume") is not None]
 
     if not closes:
-        raise ValueError(f"No close prices available for {ticker}")
+        raise ValueError(f"No close prices for {symbol}")
 
     return closes, highs, lows, volumes
 
 
-def _format_currency(value, decimals: int = 2) -> str:
-    if value is None:
-        return "N/A"
-    return f"${value:,.{decimals}f}"
+def _google_top_links(query: str, limit: int = 3) -> List[str]:
+    resp = _http_get("https://www.google.com/search", params={"q": query, "hl": "en"})
+    html = resp.text
+
+    links: List[str] = []
+    for match in re.finditer(r'href="/url\\?q=(https?://[^&\"]+)', html):
+        candidate = unquote(match.group(1))
+        if "google.com" in candidate or "webcache.googleusercontent.com" in candidate:
+            continue
+        if candidate not in links:
+            links.append(candidate)
+        if len(links) >= limit:
+            break
+    return links
+
+
+def _strip_html(text: str) -> str:
+    text = re.sub(r"<script[\\s\\S]*?</script>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<style[\\s\\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\\s+", " ", text)
+    return text.strip()
+
+
+def _google_scrape_summary(query: str, max_links: int = 3) -> str:
+    links = _google_top_links(query, limit=max_links)
+    if not links:
+        return "No links found."
+
+    snippets = []
+    for link in links:
+        try:
+            page = _http_get(link)
+            clean = _strip_html(page.text)
+            snippets.append(f"- {link}\\n  {clean[:260]}...")
+        except Exception:
+            snippets.append(f"- {link}\\n  Unable to scrape content.")
+
+    return "\\n".join(snippets)
 
 
 @tool
@@ -233,24 +218,19 @@ def get_stock_price(ticker: str) -> str:
     """
     symbol = ticker.upper()
     try:
-        quote = _quote_for_symbol(symbol)
-        current_price = quote.get("regularMarketPrice")
-        previous_close = quote.get("regularMarketPreviousClose")
-        company_name = quote.get("longName") or quote.get("shortName") or symbol
-        exchange = quote.get("fullExchangeName") or quote.get("exchange") or "N/A"
+        close, open_, high, low, volume, date = _stooq_latest_quote(symbol)
+        volume_text = f"{volume:,.0f}" if volume is not None else "N/A"
 
         return f"""Stock: {symbol}
-Current Price: {_format_currency(current_price)}
-Previous Close: {_format_currency(previous_close)}
-Company: {company_name}
-Exchange: {exchange}
+Current Price: {_format_currency(close, 4)}
+Open: {_format_currency(open_, 4)}
+Day High: {_format_currency(high, 4)}
+Day Low: {_format_currency(low, 4)}
+Volume: {volume_text}
+Latest Trading Day: {date}
+Source: Web scraping (Stooq)
 """
     except Exception as e:
-        if _is_rate_limited_error(e):
-            return (
-                f"Rate limited by Yahoo Finance while fetching {symbol}. "
-                "Please retry in 30-60 seconds."
-            )
         return f"Error fetching stock price for {symbol}: {str(e)}"
 
 
@@ -267,7 +247,7 @@ def get_stock_historical_data(ticker: str, period: str = "1mo") -> str:
     """
     symbol = ticker.upper()
     try:
-        closes, highs, lows, volumes = _chart_for_symbol(symbol, period)
+        closes, highs, lows, volumes = _recent_ohlcv(symbol, period)
 
         latest_price = closes[-1]
         period_start = closes[0]
@@ -283,13 +263,9 @@ Period Change: {period_change:+.2f}%
 Highest: {_format_currency(high)}
 Lowest: {_format_currency(low)}
 Average Volume: {avg_volume:,.0f}
+Source: Web scraping (Stooq)
 """
     except Exception as e:
-        if _is_rate_limited_error(e):
-            return (
-                f"Rate limited by Yahoo Finance while fetching {symbol} history. "
-                "Please retry in 30-60 seconds."
-            )
         return f"Error fetching historical data for {symbol}: {str(e)}"
 
 
@@ -303,43 +279,25 @@ def get_market_trends(period: str = "1mo") -> str:
     Returns:
         Market trend analysis for major indices
     """
-    indices = {
-        "^GSPC": {"name": "S&P 500", "fallback": "SPY"},
-        "^DJI": {"name": "Dow Jones", "fallback": "DIA"},
-        "^IXIC": {"name": "NASDAQ", "fallback": "QQQ"},
-        "^VIX": {"name": "Volatility Index", "fallback": "VIXY"},
+    proxies = {
+        "SPY": "S&P 500",
+        "DIA": "Dow Jones",
+        "QQQ": "NASDAQ",
+        "VIXY": "Volatility Index",
     }
 
-    results = [f"Market Trends Analysis ({period}):\n"]
+    results = [f"Market Trends Analysis ({period}):\\n"]
 
-    for ticker, meta in indices.items():
-        name = meta["name"]
-        fallback = meta["fallback"]
-
+    for symbol, name in proxies.items():
         try:
-            closes, _, _, _ = _chart_for_symbol(ticker, period)
+            closes, _, _, _ = _recent_ohlcv(symbol, period)
             change = ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] else 0.0
-            results.append(f"{name} ({ticker}): {change:+.2f}%")
-            continue
-        except Exception as primary_error:
-            if _is_rate_limited_error(primary_error):
-                results.append(f"{name}: Rate limited (retry shortly)")
-                continue
+            results.append(f"{name} ({symbol} proxy): {change:+.2f}%")
+        except Exception as e:
+            results.append(f"{name}: Error - {str(e)}")
 
-        try:
-            closes, _, _, _ = _chart_for_symbol(fallback, period)
-            change = ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] else 0.0
-            results.append(f"{name} ({fallback} proxy): {change:+.2f}%")
-        except Exception as fallback_error:
-            if _is_rate_limited_error(fallback_error):
-                results.append(f"{name}: Rate limited (retry shortly)")
-            else:
-                results.append(
-                    f"{name}: Error - index {ticker} failed ({str(primary_error)}); "
-                    f"fallback {fallback} failed ({str(fallback_error)})"
-                )
-
-    return "\n".join(results)
+    results.append("\\nSource: Web scraping (Stooq proxies)")
+    return "\\n".join(results)
 
 
 @tool
@@ -354,44 +312,26 @@ def get_stock_fundamentals(ticker: str) -> str:
     """
     symbol = ticker.upper()
     try:
-        quote = _quote_for_symbol(symbol)
-        closes, highs, lows, volumes = _chart_for_symbol(symbol, "1y")
-
-        one_year_change = ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] else 0.0
+        closes, highs, lows, volumes = _recent_ohlcv(symbol, "1y")
+        latest_price = closes[-1]
+        one_year_change = ((latest_price - closes[0]) / closes[0]) * 100 if closes[0] else 0.0
         avg_volume_30d = (sum(volumes[-30:]) / len(volumes[-30:])) if volumes else 0.0
 
-        market_cap = quote.get("marketCap")
-        market_cap_text = f"${market_cap:,}" if isinstance(market_cap, (int, float)) else "N/A"
+        web_summary = _google_scrape_summary(f"{symbol} stock market cap pe ratio dividend yield")
 
-        dividend_yield = quote.get("trailingAnnualDividendYield")
-        dividend_yield_text = f"{dividend_yield * 100:.2f}%" if isinstance(dividend_yield, (int, float)) else "N/A"
-
-        analyst = quote.get("averageAnalystRating") or "N/A"
-
-        return f"""Fundamental Data for {symbol} (Yahoo live):
-Company: {quote.get('longName') or quote.get('shortName') or symbol}
-Sector: N/A
-Industry: N/A
-Market Cap: {market_cap_text}
-P/E Ratio: {quote.get('trailingPE', 'N/A')}
-Forward P/E: N/A
-PEG Ratio: N/A
-Price to Book: {quote.get('priceToBook', 'N/A')}
-Dividend Yield: {dividend_yield_text}
-52 Week High: {_format_currency(quote.get('fiftyTwoWeekHigh') or (max(highs) if highs else None))}
-52 Week Low: {_format_currency(quote.get('fiftyTwoWeekLow') or (min(lows) if lows else None))}
-Analyst Rating: {analyst}
-Target Price: N/A
-Current Price: {_format_currency(quote.get('regularMarketPrice') or closes[-1])}
+        return f"""Fundamental Snapshot for {symbol}:
+Current Price: {_format_currency(latest_price)}
+52 Week High: {_format_currency(max(highs) if highs else None)}
+52 Week Low: {_format_currency(min(lows) if lows else None)}
 1Y Price Change: {one_year_change:+.2f}%
 Avg Volume (30d): {avg_volume_30d:,.0f}
+
+Web Research Snippets:
+{web_summary}
+
+Source: Web scraping (Stooq + Google top links)
 """
     except Exception as e:
-        if _is_rate_limited_error(e):
-            return (
-                f"Rate limited by Yahoo Finance while fetching fundamentals for {symbol}. "
-                "Please retry in 30-60 seconds."
-            )
         return f"Error fetching fundamentals for {symbol}: {str(e)}"
 
 
@@ -421,20 +361,21 @@ def get_sector_performance(sector: str = "technology") -> str:
     etf = sector_etfs.get(sector.lower(), "XLK")
 
     try:
-        closes, _, _, _ = _chart_for_symbol(etf, "1mo")
+        closes, _, _, _ = _recent_ohlcv(etf, "1mo")
         latest = closes[-1]
         month_start = closes[0]
         month_change = ((latest - month_start) / month_start) * 100 if month_start else 0.0
+        web_summary = _google_scrape_summary(f"{sector} sector performance today")
 
         return f"""Sector Performance: {sector.upper()}
-ETF: {etf}
+Proxy ETF: {etf}
 1 Month Change: {month_change:+.2f}%
 Current Price: {_format_currency(latest)}
+
+Web Research Snippets:
+{web_summary}
+
+Source: Web scraping (Stooq + Google top links)
 """
     except Exception as e:
-        if _is_rate_limited_error(e):
-            return (
-                f"Rate limited by Yahoo Finance while analyzing {sector} sector. "
-                "Please retry in 30-60 seconds."
-            )
         return f"Error analyzing {sector} sector: {str(e)}"

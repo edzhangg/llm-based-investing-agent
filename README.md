@@ -7,7 +7,8 @@ An investing agent powered by LangChain and OpenAI, with both CLI and web UI sup
 - Market analysis across major indices
 - Stock research and recommendations
 - Custom query mode
-- Live Yahoo Finance data integration with rate-limit handling
+- Web-scraped market data across tools (price, historical, fundamentals, trends)
+- Google top-link scraping for broader context
 - React + Tailwind web frontend
 
 ## Setup
@@ -51,6 +52,8 @@ http://localhost:5173
 
 - A single textbox accepts one or many tickers.
 - You can also upload a holdings CSV from the UI and auto-fill tickers.
+- Clicking `Run Analysis` navigates to a dedicated streaming page.
+- The streaming page shows live backend/tool updates and final output.
 - Examples:
   - `AAPL`
   - `AAPL, MSFT, NVDA`
@@ -81,6 +84,7 @@ python main.py --mode custom --query "What are the best dividend stocks in techn
 ## API Endpoint
 
 - `POST /api/analyze`
+- `POST /api/analyze/stream` (SSE stream of status + tool events + final output)
 - `POST /api/extract-holdings` (multipart upload with `file`)
 
 Request body:
