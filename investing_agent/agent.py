@@ -4,9 +4,9 @@ import os
 from typing import List, Dict, Any
 from datetime import datetime
 from langchain_openai import ChatOpenAI
-from langchain.agents import AgentExecutor, create_openai_functions_agent
+from langchain.agents import AgentExecutor
+from langchain.agents import create_openai_tools_agent
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.schema import SystemMessage
 
 from .tools import (
     get_stock_price,
@@ -20,7 +20,7 @@ from .tools import (
 class InvestingAgent:
     """LLM-based investing agent for market research and stock recommendations."""
 
-    def __init__(self, api_key: str = None, model: str = "gpt-4-turbo-preview"):
+    def __init__(self, api_key: str = None, model: str = "gpt-5-nano"):
         """Initialize the investing agent.
 
         Args:
@@ -33,7 +33,7 @@ class InvestingAgent:
 
         self.llm = ChatOpenAI(
             model=model,
-            temperature=0.1,
+            temperature=1,
             api_key=self.api_key
         )
 
@@ -74,8 +74,7 @@ Today's date is {date}.
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
 
-        # Create agent
-        self.agent = create_openai_functions_agent(
+        self.agent = create_openai_tools_agent(
             llm=self.llm,
             tools=self.tools,
             prompt=self.prompt

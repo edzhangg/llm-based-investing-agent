@@ -42,7 +42,7 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default="gpt-4-turbo-preview",
+        default="gpt-5-nano",
         help="OpenAI model to use"
     )
 
