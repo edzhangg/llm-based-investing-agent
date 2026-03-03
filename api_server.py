@@ -40,7 +40,7 @@ def _setup_logger() -> logging.Logger:
 
 
 LOGGER = _setup_logger()
-MAX_TICKER_WORKERS = int(os.getenv("INVESTING_AGENT_MAX_TICKER_WORKERS", "1"))
+MAX_TICKER_WORKERS = int(os.getenv("INVESTING_AGENT_MAX_TICKER_WORKERS", "8"))
 
 
 Mode = Literal["market", "research", "recommend", "custom"]
@@ -218,17 +218,25 @@ def _build_shared_context(
     tickers: List[str],
     citations: CitationBook,
     emit: Optional[Callable[[str], None]],
+    sector_override: Optional[str] = None,
 ) -> str:
     """Build market + sector context once per report, independent of ticker count."""
     if emit:
         emit("Collecting shared market and sector context")
     LOGGER.info("Shared context start period=%s focus=%s", request.period, request.focus)
+    sector_name = (sector_override or request.focus or "technology").strip().lower()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        market_future = pool.submit(market_tools.fetch_market_trends_data, request.period)
+        sector_future = pool.submit(
+            market_tools.fetch_sector_performance_data,
+            sector_name,
+            [],
+            request.period,
+        )
+        market = market_future.result()
+        sector = sector_future.result()
 
-    market = market_tools.fetch_market_trends_data(request.period)
     market_cites = citations.add_many(market.get("sources", []))
-
-    sector_name = (request.focus or "technology").strip().lower()
-    sector = market_tools.fetch_sector_performance_data(sector_name, tickers=tickers, period=request.period)
     sector_cites = citations.add_many(sector.get("sources", []))
 
     LOGGER.info(
@@ -332,10 +340,15 @@ def _build_stock_section_from_bundle(
     lines = [
         f"### {symbol}",
         f"- **Current Price:** {market_tools._fmt_currency(price.get('price'), 4)} {price_cites}",
+        f"- **What this means:** This is the latest market price per share, so it is your most direct estimate of what buyers are willing to pay right now.",
         f"- **Period Change ({period}):** {market_tools._fmt_pct(change)} {hist_cites}",
+        f"- **What this means:** This percent tells you whether momentum has been positive or negative over the selected period.",
         f"- **Range (High/Low):** {market_tools._fmt_currency(history.get('high'))} / {market_tools._fmt_currency(history.get('low'))} {hist_cites}",
+        f"- **What this means:** The range shows how volatile the stock has been. A wider range means larger swings and higher risk.",
         f"- **Average Volume:** {history.get('avg_volume', 'N/A')} {hist_cites}",
+        f"- **What this means:** Volume reflects trading activity. Higher volume usually means stronger conviction behind price moves.",
         f"- **Valuation Snapshot:** P/E {fundamentals.get('pe_ratio', 'N/A')}, Dividend {fundamentals.get('dividend_yield', 'N/A')} {fund_cites}",
+        f"- **What this means:** P/E helps compare how expensive the stock is relative to earnings. Dividend yield shows cash return from dividends.",
         f"- **Interpretation:** {history.get('interpretation', 'Trend interpretation unavailable.')} {hist_cites}",
         f"- **Recommendation:** **{fundamentals.get('recommendation', signal)}**. {fundamentals.get('rationale', friendly)}",
         f"- **Friendly Guidance:** {friendly}",
@@ -348,16 +361,10 @@ def _build_research_report(request: AnalyzeRequest, tickers: List[str], citation
     if not tickers:
         raise HTTPException(status_code=400, detail="At least one ticker is required for research mode.")
 
-    shared_context = _build_shared_context(request, tickers, citations, emit)
-    sections = [
-        "## Research Findings",
-        "This section explains what the data means and how each name fits the current market context.",
-        "",
-        shared_context,
-    ]
+    sections = ["## Research Findings", "This section explains what the data means and how each name fits the current market context."]
     bundles: Dict[str, Dict[str, Any]] = {}
 
-    worker_count = min(MAX_TICKER_WORKERS, max(1, len(tickers)))
+    worker_count = max(1, len(tickers))
     LOGGER.info("Research concurrent fetch start tickers=%s workers=%s", len(tickers), worker_count)
     with ThreadPoolExecutor(max_workers=worker_count) as pool:
         futures = {pool.submit(_get_stock_bundle, symbol, request.period, emit): symbol for symbol in tickers}
@@ -369,6 +376,31 @@ def _build_research_report(request: AnalyzeRequest, tickers: List[str], citation
             except Exception as exc:
                 LOGGER.exception("Research bundle failed symbol=%s error=%s", symbol, exc)
                 bundles[symbol] = {}
+    LOGGER.info("Research all ticker responses received tickers=%s", len(tickers))
+    if emit:
+        emit("All ticker data received. Writing report.")
+
+    sector_counts: Dict[str, int] = {}
+    for symbol in tickers:
+        sec = (bundles.get(symbol, {}).get("fundamentals", {}).get("sector") or "").strip().lower()
+        if sec:
+            sector_counts[sec] = sector_counts.get(sec, 0) + 1
+    dominant_sector = max(sector_counts, key=sector_counts.get) if sector_counts else None
+    shared_context = _build_shared_context(request, [], citations, emit, sector_override=dominant_sector)
+
+    sections.extend(
+        [
+            "",
+            "### How To Read This Report",
+            "- Price = current per-share value in the market.",
+            "- Period Change = momentum over your selected period.",
+            "- High/Low Range = volatility and risk level.",
+            "- Average Volume = strength/conviction of trading activity.",
+            "- P/E and Dividend Yield = basic valuation and income signals.",
+            "",
+            shared_context,
+        ]
+    )
 
     for symbol in tickers:
         sections.append("")
@@ -389,8 +421,6 @@ def _build_recommend_report(request: AnalyzeRequest, tickers: List[str], citatio
     if emit:
         emit("Building recommendation report")
 
-    shared_context = _build_shared_context(request, symbols, citations, emit)
-
     summary_table = [
         "## Recommendation Summary",
         "| Ticker | Action | Trend | Why It Matters |",
@@ -402,12 +432,18 @@ def _build_recommend_report(request: AnalyzeRequest, tickers: List[str], citatio
         "## What This Means",
         "Below is a friendlier interpretation of the numbers and practical next steps:",
         "",
-        shared_context,
+        "### Metric Guide (Plain English)",
+        "- Price: what one share costs now.",
+        "- Period Change: whether the stock has generally risen or fallen lately.",
+        "- High/Low: how much the price has swung.",
+        "- Volume: how active trading has been.",
+        "- P/E and Dividend Yield: rough value and income indicators.",
+        "",
     ]
     details = ["", "## Detailed Notes"]
 
     bundles: Dict[str, Dict[str, Any]] = {}
-    worker_count = min(MAX_TICKER_WORKERS, max(1, len(symbols)))
+    worker_count = max(1, len(symbols))
     LOGGER.info("Recommend concurrent fetch start tickers=%s workers=%s", len(symbols), worker_count)
     with ThreadPoolExecutor(max_workers=worker_count) as pool:
         futures = {pool.submit(_get_stock_bundle, symbol, request.period, emit): symbol for symbol in symbols}
@@ -419,6 +455,18 @@ def _build_recommend_report(request: AnalyzeRequest, tickers: List[str], citatio
             except Exception as exc:
                 LOGGER.exception("Recommend bundle failed symbol=%s error=%s", symbol, exc)
                 bundles[symbol] = {}
+    LOGGER.info("Recommend all ticker responses received tickers=%s", len(symbols))
+    if emit:
+        emit("All ticker data received. Writing report.")
+
+    sector_counts: Dict[str, int] = {}
+    for symbol in symbols:
+        sec = (bundles.get(symbol, {}).get("fundamentals", {}).get("sector") or "").strip().lower()
+        if sec:
+            sector_counts[sec] = sector_counts.get(sec, 0) + 1
+    dominant_sector = max(sector_counts, key=sector_counts.get) if sector_counts else None
+    shared_context = _build_shared_context(request, [], citations, emit, sector_override=dominant_sector)
+    narrative.append(shared_context)
 
     for symbol in symbols:
         bundle = bundles.get(symbol, {})
