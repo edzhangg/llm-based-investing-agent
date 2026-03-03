@@ -13,6 +13,7 @@ from .tools import (
     get_stock_historical_data,
     get_market_trends,
     get_stock_fundamentals,
+    get_ticker_sector_industry,
     get_sector_performance
 )
 
@@ -64,6 +65,7 @@ Today's date is {date}.
             get_stock_historical_data,
             get_market_trends,
             get_stock_fundamentals,
+            get_ticker_sector_industry,
             get_sector_performance
         ]
 

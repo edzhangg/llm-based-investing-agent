@@ -39,3 +39,6 @@ Thumbs.db
 
 # frontend
 frontend/node_modules/
+
+# logs
+logs/

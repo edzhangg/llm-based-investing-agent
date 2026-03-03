@@ -7,9 +7,11 @@ An investing agent powered by LangChain and OpenAI, with both CLI and web UI sup
 - Market analysis across major indices
 - Stock research and recommendations
 - Custom query mode
-- Web-scraped market data across tools (price, historical, fundamentals, trends)
-- Google top-link scraping for broader context
+- OpenAI web-search-backed structured market data across tools (price, historical, fundamentals, trends)
+- Cached retrieval with retry/backoff behavior to reduce duplicate calls and handle rate limits
 - React + Tailwind web frontend
+- Report-style output with in-text citation links and reference section
+- Streaming analysis page with live backend progress updates
 
 ## Setup
 
@@ -25,9 +27,11 @@ npm install
 cd ..
 ```
 
-3. Configure API key in `.env`:
+3. Configure API keys in `.env`:
 ```bash
 OPENAI_API_KEY=your_key_here
+INVESTING_AGENT_ENABLE_OPENAI_WEBSEARCH=1
+INVESTING_AGENT_WEBSEARCH_MODEL=gpt-5-mini
 ```
 
 ## Run (Web App)

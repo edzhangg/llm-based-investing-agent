@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
@@ -294,12 +296,7 @@ function AnalysisPage() {
 
             if (event.type === 'status') {
               setStatus(event.message || 'Working...')
-              setEvents((prev) => [...prev, event])
-              continue
-            }
-
-            if (event.type === 'tool_start' || event.type === 'tool_end') {
-              setEvents((prev) => [...prev, event])
+              setEvents((prev) => [...prev, event.message || 'Working...'])
               continue
             }
 
@@ -367,41 +364,42 @@ function AnalysisPage() {
         <div className="grid gap-4 md:grid-cols-5">
           {showMenu ? (
             <aside className="rounded-2xl border border-slate-200 bg-slate-50 p-4 md:col-span-2">
-              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-700">Selected Options</h2>
-              <pre className="max-h-[65vh] overflow-auto whitespace-pre-wrap rounded-lg bg-white p-3 text-xs text-slate-700">
-{JSON.stringify(payload, null, 2)}
-              </pre>
+              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-700">Analysis Settings</h2>
+              <div className="space-y-2 rounded-xl bg-white p-4 text-sm text-slate-700">
+                <p><span className="font-semibold">Mode:</span> {payload.mode}</p>
+                <p><span className="font-semibold">Period:</span> {payload.period}</p>
+                <p><span className="font-semibold">Tickers:</span> {payload.tickers?.length ? payload.tickers.join(', ') : 'N/A'}</p>
+                <p><span className="font-semibold">Focus:</span> {payload.focus || 'N/A'}</p>
+                <p><span className="font-semibold">Model:</span> {payload.model}</p>
+                <p><span className="font-semibold">Custom Query:</span> {payload.query || 'N/A'}</p>
+              </div>
             </aside>
           ) : null}
 
           <section className={`grid gap-4 ${showMenu ? 'md:col-span-3' : 'md:col-span-5'}`}>
-            <div className="rounded-2xl border border-slate-200 bg-slate-950 p-4">
-              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-200">Live Backend Updates</h2>
+            <div className="rounded-2xl border border-slate-200 bg-slate-100 p-4">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-700">Progress Timeline</h2>
               <div className="max-h-[34vh] overflow-auto space-y-2">
                 {events.length === 0 ? (
-                  <p className="text-sm text-slate-400">Waiting for tool activity...</p>
+                  <p className="text-sm text-slate-500">Preparing analysis...</p>
                 ) : (
-                  events.map((event, idx) => (
-                    <div key={`${event.type}-${idx}`} className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200">
-                      <p className="font-semibold text-brand-200">{event.type}</p>
-                      {event.message ? <p>{event.message}</p> : null}
-                      {event.tool ? <p>tool: {event.tool}</p> : null}
-                      {event.input ? <p className="break-all text-slate-300">input: {event.input}</p> : null}
-                      {event.output_preview ? <p className="break-all text-slate-300">output: {event.output_preview}</p> : null}
+                  events.map((message, idx) => (
+                    <div key={`event-${idx}`} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                      {message}
                     </div>
                   ))
                 )}
               </div>
             </div>
 
-            <div className="rounded-2xl border border-slate-200 bg-slate-950 p-4">
-              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-200">Final Output</h2>
+            <div className="rounded-2xl border border-slate-200 bg-slate-100 p-4">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-700">Final Output</h2>
               {error ? <p className="mb-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
-              {!error && !output ? <p className="text-sm text-slate-400">Output will appear when the run completes.</p> : null}
+              {!error && !output ? <p className="text-sm text-slate-500">Output will appear when the run completes.</p> : null}
               {output ? (
-                <pre className="max-h-[38vh] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-900 p-4 text-xs text-slate-200 md:text-sm">
-                  {output}
-                </pre>
+                <article className="prose max-w-none prose-headings:font-semibold prose-a:text-brand-700 prose-strong:text-slate-900 max-h-[52vh] overflow-auto rounded-lg bg-white p-5 text-slate-800">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{output}</ReactMarkdown>
+                </article>
               ) : null}
             </div>
           </section>
